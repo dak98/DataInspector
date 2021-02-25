@@ -1,0 +1,29 @@
+#/bin/sh
+
+for i in "$@"
+do
+  case $i in
+    -a=*|--address=*)
+    ADDRESS="${i#*=}"
+    shift
+    ;;
+    -p=*|--port=*)
+    PORT="${i#*=}"
+    shift
+    ;;
+    -d=*|--devices=*)
+    DEVICES="${i#*=}"
+    ;;
+  *)
+    TASK+="${i#*} "
+  esac
+done
+
+if [[ -n $ADDRESS && -n $PORT ]]; then
+  ./proxy/build/proxy $ADDRESS $PORT &
+  exec ${TASK} --inspector=${DEVICES}            \
+               --plugin-search-path plugin/build \
+	       --plugin plugin
+else
+  exec ${TASK}
+fi
