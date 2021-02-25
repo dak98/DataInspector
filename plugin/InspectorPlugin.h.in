@@ -1,0 +1,126 @@
+#ifndef INSPECTOR_PLUGIN
+#define INSPECTOR_PLUGIN
+
+#include <fairmq/Plugin.h>
+
+#include <atomic>
+#include <iostream>
+#include <thread>
+
+#include <zmq.hpp>
+
+namespace bpo = boost::program_options;
+
+constexpr char INSPECTOR_ACTIVATION_PROPERTY[] {"inspector123"};
+constexpr char O2_DEVICE_ADDRESS[] {"ipc:///tmp/broker"};
+constexpr char DATA_INSPECTOR_DEVICE[] {"DataInspector"};
+
+constexpr char SUBSCRIPTION   = 0x01;
+constexpr char UNSUBSCRIPTION = 0x00;
+
+void send(zmq::socket_t& socket, const std::string& content) {
+  zmq::message_t message{content.length()};
+  std::memcpy(message.data(), content.c_str(), content.length());
+  socket.send(message);
+}
+
+std::string recv(zmq::socket_t& socket) {
+  zmq::message_t buffer;  
+  socket.recv(&buffer);
+  std::string message;
+  message.assign(static_cast<char*>(buffer.data()), buffer.size());
+  return message;
+}
+
+namespace data_inspector {
+
+class InspectorPlugin : public fair::mq::Plugin {
+public:
+  InspectorPlugin(
+    const std::string& name,
+    const fair::mq::Plugin::Version& version,
+    const std::string& maintainer,
+    const std::string& homepage,
+    fair::mq::PluginServices* pluginServices
+  ) : fair::mq::Plugin(name, version, maintainer, homepage, pluginServices) {
+    std::cout << "STARTING WITH INSPECTOR PLUGIN" << std::endl;
+    deviceId = GetProperty<std::string>("id");
+    if (isNotDataInspectorOrInternalDevice()) {
+      SubscribeToDeviceStateChange([&](DeviceState newState) {
+        if (newState == DeviceState::InitializingDevice) {
+	  if (!PropertyExists(INSPECTOR_ACTIVATION_PROPERTY)) {
+	    SetProperty(INSPECTOR_ACTIVATION_PROPERTY, false);
+	  }
+
+	  subscriber.connect(transport);
+
+	  send(subscriber, std::string{SUBSCRIPTION});
+	  send(subscriber, deviceId);
+
+	  pollAndSelect();
+        }
+        else if (newState == DeviceState::Exiting) {
+	  running = false;
+        }
+      });
+    }
+  }
+
+  ~InspectorPlugin() noexcept {
+    if (isNotDataInspectorOrInternalDevice()) {
+      send(subscriber, std::string {UNSUBSCRIPTION});
+      t.join();
+    }
+  }
+private:
+  bool isNotDataInspectorOrInternalDevice() const noexcept {
+    return deviceId.find(DATA_INSPECTOR_DEVICE) == std::string::npos
+        && deviceId.find("internal-") == std::string::npos;
+  }
+
+  void pollAndSelect() {
+    t = std::thread {
+      [this]() {
+	while (running)
+	  try {
+	    zmq::poll(&p, 1, 1000);
+	    if (p.revents & ZMQ_POLLIN) {
+	      std::string data = recv(subscriber);
+	      SetProperty(
+	        INSPECTOR_ACTIVATION_PROPERTY,
+		data.find(deviceId) != std::string::npos
+	      );
+	    }
+	  } catch (const zmq::error_t& e) {
+	    running = false;
+	  }
+      }
+    };
+  }
+
+  zmq::context_t context {1};
+  std::string transport {O2_DEVICE_ADDRESS};
+  zmq::socket_t subscriber {context, ZMQ_XSUB};
+  zmq::pollitem_t p {static_cast<void*>(subscriber), 0, ZMQ_POLLIN, 0};
+
+  std::string deviceId;
+  std::atomic_bool running{true};
+  std::thread t;
+}; /* InspectorPlugin */
+
+fair::mq::Plugin::ProgOptions InspectorPluginProgramOptions() {
+  return bpo::options_description {"Inspector Plugin"};
+}
+
+REGISTER_FAIRMQ_PLUGIN(
+  InspectorPlugin,
+  plugin,
+  (fair::mq::Plugin::Version{@VERSION_MAJOR@,@VERSION_MINOR@,@VERSION_PATCH@}),
+  "Jakub Czajka <jakub.adam.czajka@cern.ch>",
+  "https://github.com/FairRootGroup/FairMQPlugin_example",
+  data_inspector::InspectorPluginProgramOptions
+)
+
+} /* data_inspector */
+
+#endif /* INSPECTOR_PLUGIN */
